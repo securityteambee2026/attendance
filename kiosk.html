@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>เครื่องลงเวลา</title>
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<style>
+  body{margin:0;font-family:sans-serif;background:#0b3d91;color:#fff;text-align:center}
+  h1{margin:14px 0 0;font-size:28px}
+  #clock{font-size:56px;font-weight:bold}
+  #reader{width:420px;max-width:92vw;margin:10px auto;background:#000;border-radius:12px;overflow:hidden}
+  #hint{font-size:22px;margin:10px}
+  #result{position:fixed;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;font-size:36px;padding:20px}
+  #result.ok{background:#2e7d32;display:flex}
+  #result.err{background:#c62828;display:flex}
+  #result small{font-size:22px;margin-top:14px}
+</style>
+</head>
+<body>
+<h1 id="title">เครื่องลงเวลา</h1>
+<div id="clock">--:--:--</div>
+<div id="reader"></div>
+<div id="hint"></div>
+<div id="result"><div id="rtext"></div><small id="rsub"></small></div>
+
+<script>
+/* ค่าทั้งหมดอ่านจากลิงก์ที่เมนู "3) แสดงลิงก์ของระบบ" สร้างให้ */
+const q = new URLSearchParams(location.search);
+const API_URL = q.get('api') || '';
+const BRANCH = q.get('branch') || '';
+const KEY = q.get('key') || '';
+const DEFAULT_HINT = 'แตะบัตร RFID หรือยื่นบัตร QR ให้กล้อง';
+const hint = document.getElementById('hint');
+document.getElementById('title').textContent = q.get('name') || ('สาขา ' + BRANCH);
+
+const READY = API_URL.indexOf('https://') === 0 && BRANCH && KEY;
+hint.textContent = READY ? DEFAULT_HINT : 'ลิงก์ไม่ครบ กรุณาใช้ลิงก์จากเมนู "3) แสดงลิงก์ของระบบ"';
+
+let busy = false, lastText = '', lastTime = 0;
+const loadedAt = Date.now();
+
+/* นาฬิกา และรีเฟรชหน้าเองวันละครั้งตอนตี 3 */
+setInterval(() => {
+  const d = new Date();
+  document.getElementById('clock').textContent = d.toLocaleTimeString('th-TH', { hour12: false });
+  if (d.getHours() === 3 && !busy && Date.now() - loadedAt > 3600000) location.reload();
+}, 500);
+
+/* กันหน้าจอดับ (ถ้าเบราว์เซอร์รองรับ) */
+async function keepAwake() {
+  try { if ('wakeLock' in navigator) await navigator.wakeLock.request('screen'); } catch (e) {}
+}
+keepAwake();
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') keepAwake(); });
+
+/* 1) กล้อง: สแกนบัตร QR และใช้ถ่ายรูปหน้า */
+const cam = new Html5Qrcode('reader');
+cam.start({ facingMode: 'user' }, { fps: 10, qrbox: 240 }, text => handle(text))
+   .catch(() => { if (READY) hint.textContent = 'ไม่พบกล้อง: ใช้ได้เฉพาะเครื่องอ่านบัตร'; });
+
+function snap() {
+  const v = document.querySelector('#reader video');
+  if (!v || !v.videoWidth) return '';
+  const w = 480, h = Math.round(v.videoHeight * w / v.videoWidth);
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  c.getContext('2d').drawImage(v, 0, 0, w, h);
+  return c.toDataURL('image/jpeg', 0.7);
+}
+
+/* 2) เครื่องอ่าน RFID หรือเครื่องสแกน QR แบบ USB (ทำงานเหมือนคีย์บอร์ด) */
+const SYM = { Minus:['-','_'], Equal:['=','+'], Backslash:['\\','|'], Period:['.','>'], Comma:[',','<'],
+              Slash:['/','?'], Semicolon:[';',':'], Quote:["'",'"'], BracketLeft:['[','{'], BracketRight:[']','}'] };
+function keyToChar(e) {
+  const c = e.code || ''; let m;
+  // อ่านจากตำแหน่งปุ่ม จึงอ่านถูกแม้คีย์บอร์ดของเครื่องเป็นภาษาไทย
+  if ((m = c.match(/^Key([A-Z])$/))) return e.shiftKey ? m[1] : m[1].toLowerCase();
+  if ((m = c.match(/^Digit(\d)$/)) && !e.shiftKey) return m[1];
+  if ((m = c.match(/^Numpad(\d)$/))) return m[1];
+  if (SYM[c]) return SYM[c][e.shiftKey ? 1 : 0];
+  if (e.key && e.key.length === 1 && e.key.charCodeAt(0) < 127) return e.key;
+  return '';
+}
+let buf = '', lastKey = 0;
+document.addEventListener('keydown', e => {
+  const now = Date.now();
+  if (now - lastKey > 300) buf = '';
+  lastKey = now;
+  if (e.code === 'Enter' || e.code === 'NumpadEnter' || e.key === 'Enter') {
+    e.preventDefault();
+    const t = buf.trim(); buf = '';
+    if (t.length >= 4) handle(t);
+    return;
+  }
+  const ch = keyToChar(e);
+  if (ch) { buf += ch; e.preventDefault(); }
+});
+
+/* 3) ส่งข้อมูลไปที่ระบบ */
+function handle(text) {
+  const now = Date.now();
+  if (!READY || busy || (text === lastText && now - lastTime < 8000)) return;
+  busy = true; lastText = text; lastTime = now;
+  hint.textContent = 'กรุณามองกล้อง...';
+  setTimeout(() => send(text, snap()), 1200);   // รอให้ลดบัตรลงก่อน รูปจะได้เห็นหน้าชัด
+}
+
+async function send(cardText, photo) {
+  hint.textContent = 'กำลังบันทึก...';
+  try {
+    const res = await fetch(API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ action: 'kiosk', branchId: BRANCH, kioskKey: KEY, cardText: cardText, photo: photo })
+    });
+    const r = await res.json();
+    show(r.ok, r.msg, r.unknownCard ? 'รหัสบัตร: ' + r.unknownCard : '', r.unknownCard ? 8000 : 0);
+  } catch (e) {
+    show(false, 'เชื่อมต่อไม่ได้ กรุณาลองใหม่', '', 0);
+  }
+}
+
+function show(ok, text, sub, ms) {
+  const box = document.getElementById('result');
+  document.getElementById('rtext').textContent = text;
+  document.getElementById('rsub').textContent = sub;
+  box.className = ok ? 'ok' : 'err';
+  setTimeout(() => { box.className = ''; hint.textContent = DEFAULT_HINT; busy = false; }, ms || (ok ? 3000 : 5000));
+}
+</script>
+</body>
+</html>
